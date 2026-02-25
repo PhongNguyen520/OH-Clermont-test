@@ -1,0 +1,16 @@
+# Build
+bin/
+obj/
+
+# IDE
+.vs/
+.vscode/
+*.user
+
+# Apify / local run
+apify_storage/
+
+# Output
+Images/
+*.log
+.DS_Store

@@ -1,0 +1,11 @@
+{
+  "profiles": {
+    "OH_Clermont": {
+      "commandName": "Project",
+      "workingDirectory": "$(ProjectDir)",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}

@@ -1,0 +1,23 @@
+# Build artifacts
+bin/
+obj/
+
+# IDE and editor
+.vs/
+.vscode/
+*.user
+
+# Version control
+.git/
+.gitignore
+
+# Apify local storage (do not copy into image)
+apify_storage/
+
+# Local scraping output
+Images/
+
+# Other
+*.md
+*.log
+.DS_Store

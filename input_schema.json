@@ -1,0 +1,21 @@
+{
+  "title": "OH_Clermont Scraper Input",
+  "description": "Search input for Clermont County recorder website.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "input": {
+      "title": "Search configuration",
+      "type": "object",
+      "description": "Form search config. display: records per page (must be 500). name: optional party name. fromDate/toDate: required, date in MM/dd/yyyy (e.g. 01/01/2024).",
+      "editor": "json",
+      "prefill": {
+        "display": 500,
+        "name": "",
+        "fromDate": "01/01/2024",
+        "toDate": "01/01/2024"
+      }
+    }
+  },
+  "required": ["input"]
+}

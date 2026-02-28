@@ -41,14 +41,36 @@ public class ClermontScraperService
 
         await ApifyHelper.SetStatusMessageAsync("Starting OH-Clermont scraper...");
 
-        _playwright = await Playwright.CreateAsync();
+        // Validate dates before retry loop (validation errors are not retryable)
+        DateTime fromDate, toDate;
+        try
+        {
+            fromDate = ParseDate(config.FromDate, "fromDate");
+            toDate = ParseDate(config.ToDate, "toDate");
+        }
+        catch (ArgumentException ex)
+        {
+            await ApifyHelper.SetStatusMessageAsync($"Validation Error: {ex.Message}", isTerminal: true);
+            throw;
+        }
 
-        // On Apify we run headless; locally we keep the UI visible for debugging
-        var isApify = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("APIFY_CONTAINER_PORT"));
+        int maxRetries = 3;
+        IPage? resultPage = null;
 
-        // Prefer Chrome channel when available, otherwise fall back to plain Chromium.
-        // Chromium args to reduce memory use and avoid OOM (especially in Docker/Apify)
-        var browserArgs = new[]
+        for (int attempt = 1; attempt <= maxRetries; attempt++)
+        {
+            try
+            {
+                await ApifyHelper.SetStatusMessageAsync($"Attempt {attempt} of {maxRetries}...");
+
+                _playwright = await Playwright.CreateAsync();
+
+                // On Apify we run headless; locally we keep the UI visible for debugging
+                var isApify = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("APIFY_CONTAINER_PORT"));
+
+                // Prefer Chrome channel when available, otherwise fall back to plain Chromium.
+                // Chromium args to reduce memory use and avoid OOM (especially in Docker/Apify)
+                var browserArgs = new[]
         {
             "--no-default-browser-check",
             "--disable-dev-shm-usage",
@@ -122,21 +144,7 @@ public class ClermontScraperService
         var display = config.Display <= 0 ? 500 : config.Display;
         await SetupSearchPageAsync(page, display);
 
-        // 8) Set Recorded Date From/To from the input (fromDate/toDate).
-        DateTime fromDate, toDate;
-        try
-        {
-            fromDate = ParseDate(config.FromDate, "fromDate");
-            toDate = ParseDate(config.ToDate, "toDate");
-        }
-        catch (ArgumentException ex)
-        {
-            await ApifyHelper.SetStatusMessageAsync($"Validation Error: {ex.Message}", isTerminal: true);
-            throw;
-        }
-
-        try
-        {
+            // 8) Set Recorded Date From/To (fromDate/toDate validated above), search, and scrape
             await SetDateRangeForDayAsync(page, fromDate);
             await Task.Delay(1500);
             await ClickSearchAsync(page);
@@ -156,13 +164,24 @@ public class ClermontScraperService
             {
                 CloseCsvStream();
             }
-            return page;
+            resultPage = page;
+            break;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Attempt {attempt}] Error: {ex.Message}");
+                await StopAsync();
+                if (attempt == maxRetries)
+                {
+                    await ApifyHelper.SetStatusMessageAsync($"Fatal Error after {maxRetries} attempts: {ex.Message}", isTerminal: true);
+                    throw;
+                }
+                await ApifyHelper.SetStatusMessageAsync($"Attempt {attempt} failed. Retrying in 10 seconds...");
+                await Task.Delay(10000);
+            }
         }
-        catch (Exception ex)
-        {
-            await ApifyHelper.SetStatusMessageAsync($"Fatal Error: {ex.Message}", isTerminal: true);
-            throw;
-        }
+
+        return resultPage!;
     }
 
     static DateTime ParseDate(string value, string fieldName)

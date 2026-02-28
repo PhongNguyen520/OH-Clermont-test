@@ -5,11 +5,10 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text.RegularExpressions;
 using CsvHelper;
+using ImageMagick;
 using Microsoft.Playwright;
 using OH_Clermont;
 using OH_Clermont.Models;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.Formats.Tiff;
 
 namespace OH_Clermont.Services;
 
@@ -39,6 +38,8 @@ public class ClermontScraperService
     public async Task<IPage> LaunchAsync(InputConfig config)
     {
         config ??= new InputConfig();
+
+        await ApifyHelper.SetStatusMessageAsync("Starting OH-Clermont scraper...");
 
         _playwright = await Playwright.CreateAsync();
 
@@ -122,28 +123,46 @@ public class ClermontScraperService
         await SetupSearchPageAsync(page, display);
 
         // 8) Set Recorded Date From/To from the input (fromDate/toDate).
-        var fromDate = ParseDate(config.FromDate, "fromDate");
-        var toDate = ParseDate(config.ToDate, "toDate");
-        await SetDateRangeForDayAsync(page, fromDate);
-        await Task.Delay(1500);
-        await ClickSearchAsync(page);
-
-        // 9) Open CSV once for the whole run (like OH-Montgomery) to avoid OOM from repeated open/close per record
-        var outputDirectory = Directory.GetCurrentDirectory();
-        var exportImages = config.ExportImages;
-        if (!exportImages)
-            Console.WriteLine("[Scrape] ExportImages=false: skipping image download to reduce memory.");
-        OpenCsvStreamForRun(fromDate, outputDirectory);
+        DateTime fromDate, toDate;
         try
         {
-            await ScrapeAllRecordsOnResultsPageAsync(page, fromDate, outputDirectory, exportImages);
-            Console.WriteLine("[Scrape] Done. Records were pushed to Dataset and appended to CSV.");
+            fromDate = ParseDate(config.FromDate, "fromDate");
+            toDate = ParseDate(config.ToDate, "toDate");
         }
-        finally
+        catch (ArgumentException ex)
         {
-            CloseCsvStream();
+            await ApifyHelper.SetStatusMessageAsync($"Validation Error: {ex.Message}", isTerminal: true);
+            throw;
         }
-        return page;
+
+        try
+        {
+            await SetDateRangeForDayAsync(page, fromDate);
+            await Task.Delay(1500);
+            await ClickSearchAsync(page);
+
+            // 9) Open CSV once for the whole run (like OH-Montgomery) to avoid OOM from repeated open/close per record
+            var outputDirectory = Directory.GetCurrentDirectory();
+            var exportImages = config.ExportImages;
+            if (!exportImages)
+                Console.WriteLine("[Scrape] ExportImages=false: skipping image download to reduce memory.");
+            OpenCsvStreamForRun(fromDate, outputDirectory);
+            try
+            {
+                await ScrapeAllRecordsOnResultsPageAsync(page, fromDate, outputDirectory, exportImages);
+                Console.WriteLine("[Scrape] Done. Records were pushed to Dataset and appended to CSV.");
+            }
+            finally
+            {
+                CloseCsvStream();
+            }
+            return page;
+        }
+        catch (Exception ex)
+        {
+            await ApifyHelper.SetStatusMessageAsync($"Fatal Error: {ex.Message}", isTerminal: true);
+            throw;
+        }
     }
 
     static DateTime ParseDate(string value, string fieldName)
@@ -188,19 +207,45 @@ public class ClermontScraperService
         return end - start + 1;
     }
 
-    /// <summary>
-    /// Convert PNG bytes (captured from canvas) to TIFF for durable storage.
+   /// <summary>
+    /// Converts multiple base64 PNG/JPEG strings into a single Multi-page TIFF byte array,
+    /// applying CCITT Group 4 compression to drastically reduce file size.
     /// </summary>
-    static byte[] ConvertPngToTiff(byte[] pngBytes)
+    static byte[] CreateMultiPageCompressedTiff(string[] base64Images)
     {
-        using var image = Image.Load(pngBytes);
-        using var ms = new MemoryStream();
-        image.Save(ms, new TiffEncoder());
-        var result = ms.ToArray();
+        using var collection = new MagickImageCollection();
+        foreach (var b64 in base64Images)
+        {
+            if (string.IsNullOrWhiteSpace(b64)) continue;
 
-        Configuration.Default.MemoryAllocator.ReleaseRetainedResources();
-    
-        return result;
+            var imgBytes = Convert.FromBase64String(b64);
+            var image = new MagickImage(imgBytes);
+
+            // Bắt buộc loại bỏ kênh Alpha (trong suốt) vì TIFF Group 4 không hỗ trợ
+            image.HasAlpha = false; 
+
+            // Ép màu sắc về thang xám (Grayscale)
+            image.ColorSpace = ColorSpace.Gray;
+
+            // Dùng thuật toán Threshold (ngưỡng 50%) để ép tất cả pixel thành 100% Trắng hoặc 100% Đen
+            image.Threshold(new Percentage(50));
+
+            // SỬA LỖI Ở ĐÂY: Dùng ColorType.Bilevel thay vì Type = MagickType.Bilevel
+            image.ColorType = ColorType.Bilevel; 
+
+            // Cấu hình định dạng và chuẩn nén
+            image.Format = MagickFormat.Tif;
+            image.Settings.Compression = CompressionMethod.Group4;
+            
+            // Mật độ điểm ảnh (Độ phân giải) chuẩn văn phòng
+            image.Density = new Density(300, 300);
+
+            collection.Add(image);
+        }
+
+        using var outputStream = new MemoryStream();
+        collection.Write(outputStream, MagickFormat.Tif);
+        return outputStream.ToArray();
     }
 
     static async Task<bool> HasErrorSnippetAsync(IPage page, string snippet)
@@ -526,8 +571,15 @@ public class ClermontScraperService
         if (totalToProcess == 0)
             return new List<ClermontRecord>();
 
+        await ApifyHelper.SetStatusMessageAsync("Found records. Preparing to extract...");
+
         for (var i = 0; i < totalToProcess; i++)
         {
+            if ((i + 1) % 10 == 0)
+            {
+                await ApifyHelper.SetStatusMessageAsync($"Processing record {i + 1} of {totalToProcess} on current page...");
+            }
+
             if (i == 0)
             {
                 // First record: click the Instrument # link directly from the result list
@@ -573,6 +625,10 @@ public class ClermontScraperService
             await ClickBackToResultsAsync(page);
             await ClickNextResultsPageAsync(page);
             await ScrapeAllRecordsOnResultsPageAsync(page, searchDate, outputDirectory, exportImages);
+        }
+        else
+        {
+            await ApifyHelper.SetStatusMessageAsync("Success: All records exported to CSV and Dataset.", isTerminal: true);
         }
 
         return new List<ClermontRecord>();
@@ -676,6 +732,8 @@ public class ClermontScraperService
             return parts.length === 2 ? parts[1] : null;
         }}";
 
+        var base64List = new List<string>();
+
         for (var pageIndex = 1; pageIndex <= pagesToProcess; pageIndex++)
         {
             // Wait until the image on the current page is fully loaded (poll several times)
@@ -698,33 +756,7 @@ public class ClermontScraperService
                 var base64 = await docImgFrame.EvaluateAsync<string?>(captureScript);
                 if (!string.IsNullOrEmpty(base64))
                 {
-                    byte[] tiffBytes;
-                    try
-                    {
-                        var pngBytes = Convert.FromBase64String(base64);
-                        tiffBytes = ConvertPngToTiff(pngBytes);
-                        // Drop PNG buffer as soon as we have TIFF to reduce peak memory
-                        pngBytes = null;
-                    }
-                    catch
-                    {
-                        tiffBytes = Convert.FromBase64String(base64);
-                    }
-
-                    var ext = ".tiff";
-                    var fileName = pagesToProcess > 1
-                        ? $"{baseName}-p{pageIndex}{ext}"
-                        : $"{baseName}{ext}";
-                    var key = $"Images/{dateForFilename}/{baseName}/{fileName}";
-
-                    await ApifyHelper.SaveImageAsync(key, tiffBytes);
-                    imageLinks.Add(ApifyHelper.GetRecordUrl(key));
-                    Console.WriteLine($"[Images] Saved {key}");
-                    // Release large buffers and hint GC to avoid OOM across many image pages
-                    tiffBytes = null;
-                    base64 = null;
-                    GC.Collect();
-                    GC.WaitForPendingFinalizers();
+                    base64List.Add(base64);
                 }
             }
             catch (Exception ex)
@@ -745,7 +777,6 @@ public class ClermontScraperService
                     }
                     else
                     {
-                        // If there is no Next button, stop the loop
                         break;
                     }
                 }
@@ -753,6 +784,32 @@ public class ClermontScraperService
                 {
                     break;
                 }
+            }
+        }
+
+        // --- Merge all collected pages into ONE Multi-page TIF ---
+        var base64Arr = base64List.ToArray();
+        if (base64Arr.Length > 0)
+        {
+            try
+            {
+                var bytes = CreateMultiPageCompressedTiff(base64Arr);
+                var fileName = $"{baseName}.tif";
+                var key = $"Images/{dateForFilename}/{baseName}/{fileName}";
+
+                await ApifyHelper.SaveImageAsync(key, bytes);
+                imageLinks.Add(ApifyHelper.GetRecordUrl(key));
+
+                Console.WriteLine($"[Images] Saved Multi-page TIF ({base64Arr.Length} pages): {key}");
+
+                // Cleanup
+                base64List.Clear();
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Images] Error saving Multi-page TIF for record {recordIndex}: {ex.Message}");
             }
         }
 

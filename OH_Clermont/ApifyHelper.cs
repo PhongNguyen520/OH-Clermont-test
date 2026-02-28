@@ -288,6 +288,44 @@ public static class ApifyHelper
         return Path.Combine(kvDir, localKey);
     }
 
+    /// <summary>
+    /// Sets the status message displayed on the Apify Dashboard for the current run.
+    /// Uses REST API PUT /v2/actor-runs/:runId. No-op when running locally (no APIFY_ACTOR_RUN_ID).
+    /// </summary>
+    public static async Task SetStatusMessageAsync(string message, bool isTerminal = false, CancellationToken ct = default)
+    {
+        var runId = Environment.GetEnvironmentVariable("APIFY_ACTOR_RUN_ID")
+            ?? Environment.GetEnvironmentVariable("APIFY_RUN_ID");
+        var token = Environment.GetEnvironmentVariable("APIFY_TOKEN");
+
+        if (string.IsNullOrEmpty(runId) || string.IsNullOrEmpty(token))
+            return;
+
+        try
+        {
+            var apiBase = Environment.GetEnvironmentVariable("APIFY_API_PUBLIC_BASE_URL") ?? "https://api.apify.com";
+            var url = $"{apiBase.TrimEnd('/')}/v2/actor-runs/{Uri.EscapeDataString(runId)}";
+            var body = JsonSerializer.Serialize(new
+            {
+                runId,
+                statusMessage = message ?? "",
+                isStatusMessageTerminal = isTerminal
+            });
+
+            using var request = new HttpRequestMessage(HttpMethod.Put, url);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+
+            using var response = await HttpClient.SendAsync(request, ct);
+            if (!response.IsSuccessStatusCode)
+                Console.WriteLine($"[ApifyHelper] SetStatusMessage failed: {(int)response.StatusCode}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ApifyHelper] SetStatusMessage error: {ex.Message}");
+        }
+    }
+
     internal static string SanitizeKeyForApify(string key)
     {
         if (string.IsNullOrEmpty(key)) return "unnamed";

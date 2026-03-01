@@ -391,10 +391,6 @@ public class ClermontScraperService
 
         var linkCount = await resultListFrame.Locator(instrumentSelector).CountAsync();
         var totalToProcess = pageCount > 0 ? Math.Min(pageCount, linkCount) : linkCount;
-        const int TestLimit = 5;
-        totalToProcess = Math.Min(totalToProcess, TestLimit);
-        if ((pageCount > 0 ? Math.Min(pageCount, linkCount) : linkCount) > TestLimit)
-            Console.WriteLine($"[OH_Clermont] Limiting to {TestLimit} records for test.");
 
         Console.WriteLine($"[Results] navDisplay pageCount = {pageCount}, instrumentLinks = {linkCount}, totalToProcess = {totalToProcess}, currentPage = {currentPage}, totalPages = {totalPages}");
 

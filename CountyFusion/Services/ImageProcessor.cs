@@ -36,8 +36,37 @@ public static class ImageProcessor
         return outputStream.ToArray();
     }
 
-    /// <summary>Process all image pages for current record: capture canvas, convert to TIFF, store via Apify KV.</summary>
-    public static async Task ProcessImagesForCurrentRecordAsync(IPage page, ClermontRecord record, DateTime searchDate, int recordIndex)
+    /// <summary>Converts base64 images to a single Multi-page PDF.</summary>
+    public static byte[] CreateMultiPagePdf(string[] base64Images)
+    {
+        using var collection = new MagickImageCollection();
+        foreach (var b64 in base64Images)
+        {
+            if (string.IsNullOrWhiteSpace(b64)) continue;
+
+            var imgBytes = Convert.FromBase64String(b64);
+            var image = new MagickImage(imgBytes);
+            image.HasAlpha = false;
+            image.ColorSpace = ColorSpace.Gray;
+            image.Threshold(new Percentage(50));
+            image.ColorType = ColorType.Bilevel;
+            image.Format = MagickFormat.Pdf;
+            image.Density = new Density(300, 300);
+            collection.Add(image);
+        }
+
+        using var outputStream = new MemoryStream();
+        collection.Write(outputStream, MagickFormat.Pdf);
+        return outputStream.ToArray();
+    }
+
+    /// <summary>Process all image pages for current record: capture canvas, convert to TIFF/PDF, store via Apify KV.</summary>
+    public static async Task ProcessImagesForCurrentRecordAsync(
+        IPage page,
+        ClermontRecord record,
+        DateTime searchDate,
+        int recordIndex,
+        string fileFormat = "tif")
     {
         var imageLinks = new List<string>();
 
@@ -257,14 +286,22 @@ public static class ImageProcessor
         {
             try
             {
-                var bytes = CreateMultiPageCompressedTiff(base64Arr);
-                var fileName = $"{baseName}.tif";
+                var normalizedFormat = (fileFormat ?? "tif").Trim();
+                var usePdf = string.Equals(normalizedFormat, "pdf", StringComparison.OrdinalIgnoreCase);
+
+                var bytes = usePdf
+                    ? CreateMultiPagePdf(base64Arr)
+                    : CreateMultiPageCompressedTiff(base64Arr);
+
+                var extension = usePdf ? "pdf" : "tif";
+                var fileName = $"{baseName}.{extension}";
                 var key = $"Images/{dateForFilename}/{baseName}/{fileName}";
 
                 await ApifyHelper.SaveImageAsync(key, bytes);
                 imageLinks.Add(ApifyHelper.GetRecordUrl(key));
 
-                Console.WriteLine($"[Images] Saved Multi-page TIF ({base64Arr.Length} pages): {key}");
+                var label = usePdf ? "PDF" : "TIF";
+                Console.WriteLine($"[Images] Saved Multi-page {label} ({base64Arr.Length} pages): {key}");
 
                 base64List.Clear();
                 GC.Collect();

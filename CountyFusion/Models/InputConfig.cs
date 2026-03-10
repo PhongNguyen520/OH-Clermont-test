@@ -23,4 +23,19 @@ public class InputConfig
     /// Set to false if you only need CSV/Dataset data.
     /// </summary>
     public bool ExportImages { get; set; } = true;
+
+    /// <summary>
+    /// Search mode: "Date" (use FromDate/ToDate) or "Instrument" (use InstrumentNumbers list).
+    /// </summary>
+    public string SearchType { get; set; } = "Date";
+
+    /// <summary>
+    /// Comma-separated list of instrument numbers when SearchType == "Instrument".
+    /// </summary>
+    public string InstrumentNumbers { get; set; } = "";
+
+    /// <summary>
+    /// Output file format for images: "tif" (default) or "pdf".
+    /// </summary>
+    public string FileFormat { get; set; } = "tif";
 }

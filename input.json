@@ -2,6 +2,9 @@
   "input": {
     "fromDate": "02/09/1984",
     "toDate": "02/09/1984",
-    "countyName": "Clermont"
+    "countyName": "Ross",
+    "searchType": "Instrument",
+    "instrumentNumbers": "198400000427,198400000428,198400000429,198400000430,198400000431,198400000432",
+    "fileFormat": "pdf"
   }
 }

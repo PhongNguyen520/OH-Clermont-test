@@ -7,12 +7,15 @@
     "input": {
       "title": "Search configuration",
       "type": "object",
-      "description": "Form search config. countyName: Clermont (default), Ross, or Butler. Records per page set to county max. fromDate/toDate: required, MM/dd/yyyy.",
+      "description": "Form search config. countyName: Clermont (default), Ross, or Butler. SearchType: \"Date\" (use fromDate/toDate) or \"Instrument\" (use instrumentNumbers, comma-separated). FileFormat: \"tif\" (default) or \"pdf\".",
       "editor": "json",
       "prefill": {
         "countyName": "Clermont",
         "fromDate": "01/01/2024",
-        "toDate": "01/01/2024"
+        "toDate": "01/01/2024",
+        "searchType": "Date",
+        "instrumentNumbers": "",
+        "fileFormat": "tif"
       }
     }
   },

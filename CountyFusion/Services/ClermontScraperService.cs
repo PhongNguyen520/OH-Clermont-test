@@ -27,6 +27,9 @@ public class ClermontScraperService
     {
         config ??= new InputConfig();
 
+        var searchType = (config.SearchType ?? "Date").Trim();
+        var isInstrumentSearch = string.Equals(searchType, "Instrument", StringComparison.OrdinalIgnoreCase);
+
         await ApifyHelper.SetStatusMessageAsync("Starting CountyFusion scraper...");
         _currentLoginUrl = ResolveLoginUrl(config.CountyName);
         _effectiveDisplay = GetMaxDisplayForCounty(config.CountyName);
@@ -108,63 +111,187 @@ public class ClermontScraperService
         await FormFiller.ClickDisclaimerAcceptAsync(page);
         await FormFiller.ClickSearchPublicRecordsAsync(page);
 
-        await FormFiller.SetupSearchPageAsync(page, _effectiveDisplay);
-
-        int searchRetries = 3;
-        bool searchSuccess = false;
-
-        for (int attempt = 1; attempt <= searchRetries; attempt++)
+        // Build instrument list if needed
+        var instrumentList = new List<string>();
+        if (isInstrumentSearch)
         {
+            var rawList = config.InstrumentNumbers ?? string.Empty;
+            instrumentList = rawList
+                .Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(s => s.Trim())
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .ToList();
+
+            if (instrumentList.Count == 0)
+            {
+                await ApifyHelper.SetStatusMessageAsync(
+                    "SearchType is 'Instrument' but no InstrumentNumbers were provided. Falling back to Date search.",
+                    isTerminal: false);
+                isInstrumentSearch = false;
+            }
+        }
+
+        if (isInstrumentSearch)
+        {
+            var outputDirectory = Directory.GetCurrentDirectory();
+            var exportImages = config.ExportImages;
+            if (!exportImages)
+                Console.WriteLine("[Scrape] ExportImages=false: skipping image download to reduce memory.");
+
+            _csvExportHelper = new CsvExportHelper();
+            _csvExportHelper.OpenCsvStreamForRun(fromDate, outputDirectory);
+
+            int totalAll = 0, succeededAll = 0, failedAll = 0;
+
             try
             {
-                if (attempt > 1)
+                for (var idx = 0; idx < instrumentList.Count; idx++)
                 {
-                    await ApifyHelper.SetStatusMessageAsync($"Search attempt {attempt} of {searchRetries}...");
-                    await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.NetworkIdle });
-                    await Task.Delay(2000);
-                    await FormFiller.SetupSearchPageAsync(page, _effectiveDisplay);
+                    var instrument = instrumentList[idx];
+
+                    if (idx > 0)
+                    {
+                        // For subsequent instruments, start a fresh session on the search form
+                        await ClearCookiesAndReloadAsync(page);
+                        await FormFiller.ClickLoginAsPublicAsync(page);
+                        await FormFiller.ClickDisclaimerAcceptAsync(page);
+                        await FormFiller.ClickSearchPublicRecordsAsync(page);
+                    }
+
+                    await FormFiller.SetupInstrumentSearchAsync(page, instrument, _effectiveDisplay);
+
+                    const int searchRetriesPerInstrument = 3;
+                    var searchSuccessForInstrument = false;
+
+                    for (int attempt = 1; attempt <= searchRetriesPerInstrument; attempt++)
+                    {
+                        try
+                        {
+                            if (attempt > 1)
+                            {
+                                await ApifyHelper.SetStatusMessageAsync(
+                                    $"Instrument {instrument}: search attempt {attempt} of {searchRetriesPerInstrument}...");
+                                await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.NetworkIdle });
+                                await Task.Delay(2000);
+                                await FormFiller.SetupInstrumentSearchAsync(page, instrument, _effectiveDisplay);
+                            }
+
+                            await FormFiller.ClickSearchAsync(page);
+                            searchSuccessForInstrument = true;
+                            break;
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[Instrument {instrument}] Attempt {attempt} failed: {ex.Message}");
+                            if (attempt == searchRetriesPerInstrument)
+                            {
+                                await ApifyHelper.SetStatusMessageAsync(
+                                    $"Fatal Error during search for instrument {instrument} after {searchRetriesPerInstrument} attempts: {ex.Message}",
+                                    isTerminal: false);
+                            }
+                            await Task.Delay(5000);
+                        }
+                    }
+
+                    if (!searchSuccessForInstrument)
+                        continue;
+
+                    var (total, succeeded, failed) = await ScrapeAllRecordsOnResultsPageAsync(
+                        page,
+                        fromDate,
+                        outputDirectory,
+                        exportImages,
+                        config.FileFormat,
+                        isInstrumentSearch: true,
+                        instrumentNumber: instrument);
+
+                    totalAll += total;
+                    succeededAll += succeeded;
+                    failedAll += failed;
                 }
 
-                await FormFiller.SetDateRangeForDayAsync(page, fromDate);
-                await Task.Delay(1500);
-                await FormFiller.ClickSearchAsync(page);
-                searchSuccess = true;
-                break;
+                await ApifyHelper.SetStatusMessageAsync(
+                    $"Finished! Total {totalAll} requests: {succeededAll} succeeded, {failedAll} failed.",
+                    isTerminal: true);
+                Console.WriteLine("[Scrape] Done. Records were pushed to Dataset and appended to CSV.");
             }
-            catch (Exception ex)
+            finally
             {
-                Console.WriteLine($"[Attempt {attempt}] Search failed: {ex.Message}");
-                if (attempt == searchRetries)
-                {
-                    await ApifyHelper.SetStatusMessageAsync($"Fatal Error during search after {searchRetries} attempts: {ex.Message}", isTerminal: true);
-                    throw;
-                }
-                await Task.Delay(5000);
+                _csvExportHelper.CloseCsvStream();
             }
+
+            return page;
         }
-
-        if (!searchSuccess) return page;
-
-        var outputDirectory = Directory.GetCurrentDirectory();
-        var exportImages = config.ExportImages;
-        if (!exportImages)
-            Console.WriteLine("[Scrape] ExportImages=false: skipping image download to reduce memory.");
-
-        _csvExportHelper = new CsvExportHelper();
-        _csvExportHelper.OpenCsvStreamForRun(fromDate, outputDirectory);
-
-        try
+        else
         {
-            var (total, succeeded, failed) = await ScrapeAllRecordsOnResultsPageAsync(page, fromDate, outputDirectory, exportImages);
-            await ApifyHelper.SetStatusMessageAsync($"Finished! Total {total} requests: {succeeded} succeeded, {failed} failed.", isTerminal: true);
-            Console.WriteLine("[Scrape] Done. Records were pushed to Dataset and appended to CSV.");
-        }
-        finally
-        {
-            _csvExportHelper.CloseCsvStream();
-        }
+            await FormFiller.SetupSearchPageAsync(page, _effectiveDisplay);
 
-        return page;
+            int searchRetries = 3;
+            bool searchSuccess = false;
+
+            for (int attempt = 1; attempt <= searchRetries; attempt++)
+            {
+                try
+                {
+                    if (attempt > 1)
+                    {
+                        await ApifyHelper.SetStatusMessageAsync($"Search attempt {attempt} of {searchRetries}...");
+                        await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.NetworkIdle });
+                        await Task.Delay(2000);
+                        await FormFiller.SetupSearchPageAsync(page, _effectiveDisplay);
+                    }
+
+                    await FormFiller.SetDateRangeForDayAsync(page, fromDate);
+                    await Task.Delay(1500);
+                    await FormFiller.ClickSearchAsync(page);
+
+                    searchSuccess = true;
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Attempt {attempt}] Search failed: {ex.Message}");
+                    if (attempt == searchRetries)
+                    {
+                        await ApifyHelper.SetStatusMessageAsync(
+                            $"Fatal Error during search after {searchRetries} attempts: {ex.Message}",
+                            isTerminal: true);
+                        throw;
+                    }
+                    await Task.Delay(5000);
+                }
+            }
+
+            if (!searchSuccess) return page;
+
+            var outputDirectory = Directory.GetCurrentDirectory();
+            var exportImages = config.ExportImages;
+            if (!exportImages)
+                Console.WriteLine("[Scrape] ExportImages=false: skipping image download to reduce memory.");
+
+            _csvExportHelper = new CsvExportHelper();
+            _csvExportHelper.OpenCsvStreamForRun(fromDate, outputDirectory);
+
+            try
+            {
+                var (total, succeeded, failed) = await ScrapeAllRecordsOnResultsPageAsync(
+                    page,
+                    fromDate,
+                    outputDirectory,
+                    exportImages,
+                    config.FileFormat);
+                await ApifyHelper.SetStatusMessageAsync(
+                    $"Finished! Total {total} requests: {succeeded} succeeded, {failed} failed.",
+                    isTerminal: true);
+                Console.WriteLine("[Scrape] Done. Records were pushed to Dataset and appended to CSV.");
+            }
+            finally
+            {
+                _csvExportHelper.CloseCsvStream();
+            }
+
+            return page;
+        }
     }
 
     /// <summary>Scrape Instrument Info from DocumentInfoView detail page into ClermontRecord with retries until core labels are present.</summary>
@@ -416,12 +543,86 @@ public class ClermontScraperService
         return record;
     }
 
-    /// <summary>Scrape all records on results page: click first, then Next, flush after each record.</summary>
+    /// <summary>
+    /// Fallback: scrape a single result row from the results table (no detail view).
+    /// Used when detail page keeps timing out – we still emit a partial record instead of skipping.
+    /// </summary>
+    static async Task<ClermontRecord?> TryScrapeResultRowSummaryAsync(IPage page, int index)
+    {
+        try
+        {
+            if (index < 0)
+                return null;
+
+            var bodyFrame = page.FrameLocator("iframe[name='bodyframe']");
+            var resultFrame = bodyFrame.FrameLocator("iframe[name='resultFrame']");
+            var resultListFrame = resultFrame.FrameLocator("iframe[name='resultListFrame']");
+
+            var rowLocator = resultListFrame.Locator(
+                "#instList .datagrid-view2 .datagrid-body .datagrid-btable tr.datagrid-row").Nth(index);
+
+            if (await rowLocator.CountAsync() == 0)
+                return null;
+
+            static async Task<string> GetCellTextAsync(ILocator row, string fieldSelector)
+            {
+                var cell = row.Locator(fieldSelector);
+                if (await cell.CountAsync() == 0)
+                    return string.Empty;
+                var text = (await cell.First.InnerTextAsync()) ?? string.Empty;
+                return text.Replace("\u00A0", " ").Trim();
+            }
+
+            var record = new ClermontRecord();
+
+            // Instrument # (Document Number)
+            var instCell = rowLocator.Locator("td[field='2'] a");
+            if (await instCell.CountAsync() > 0)
+            {
+                var instText = (await instCell.First.InnerTextAsync()) ?? string.Empty;
+                instText = instText.Replace("\u00A0", " ").Trim();
+                record.DocumentNumber = DomHelper.ExtractInstrumentNumber(instText);
+                if (string.IsNullOrWhiteSpace(record.DocumentNumber))
+                    record.DocumentNumber = instText;
+            }
+
+            // Book, Page, Document Type
+            record.Book = await GetCellTextAsync(rowLocator, "td[field='3']");
+            record.Page = await GetCellTextAsync(rowLocator, "td[field='4']");
+            record.DocumentType = await GetCellTextAsync(rowLocator, "td[field='5']");
+
+            // Names: map primary Name -> Grantor, Other Name -> Grantee (best effort)
+            var grantorText = await GetCellTextAsync(rowLocator, "td[field='7'] span");
+            var granteeText = await GetCellTextAsync(rowLocator, "td[field='9'] span");
+            record.Grantor = grantorText;
+            record.Grantee = granteeText;
+
+            // Recorded date and Legal description
+            record.RecordingDate = await GetCellTextAsync(rowLocator, "td[field='10']");
+            record.Legal = await GetCellTextAsync(rowLocator, "td[field='11']");
+
+            record.Remarks = "[PARTIAL] Detail page not accessible; data scraped from results list row only.";
+
+            return record;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Scrape all records on results page: click first, then Next, flush after each record.
+    /// When isInstrumentSearch = true, recovery logic will re-run Instrument search instead of Date search.
+    /// </summary>
     public async Task<(int total, int succeeded, int failed)> ScrapeAllRecordsOnResultsPageAsync(
         IPage page,
         DateTime searchDate,
         string outputDirectory,
-        bool exportImages = true)
+        bool exportImages = true,
+        string fileFormat = "tif",
+        bool isInstrumentSearch = false,
+        string? instrumentNumber = null)
     {
         var batch = new List<ClermontRecord>(capacity: 1);
 
@@ -482,6 +683,7 @@ public class ClermontScraperService
         var pageSucceeded = 0;
         var pageFailed = 0;
         var recoveryAttemptedForIndex = -1;
+        ClermontRecord? recoveryRowSummary = null;
 
         for (var i = 0; i < totalToProcess; i++)
         {
@@ -524,7 +726,7 @@ public class ClermontScraperService
                     batch.Add(record);
 
                     if (exportImages)
-                        await ImageProcessor.ProcessImagesForCurrentRecordAsync(page, record, searchDate, i + 1);
+                        await ImageProcessor.ProcessImagesForCurrentRecordAsync(page, record, searchDate, i + 1, fileFormat);
 
                     pageSucceeded++;
                     recoveryAttemptedForIndex = -1;
@@ -532,6 +734,17 @@ public class ClermontScraperService
                 catch (Exception ex)
                 {
                     Console.WriteLine($"[CountyFusion] Error processing record {i + 1}: {ex.Message}");
+
+                    // Capture summary info from the results table before any heavy recovery,
+                    // so we can still emit a partial row if detail view keeps failing.
+                    if (recoveryRowSummary == null || recoveryAttemptedForIndex != i)
+                    {
+                        recoveryRowSummary = await TryScrapeResultRowSummaryAsync(page, i);
+                        if (recoveryRowSummary != null)
+                        {
+                            Console.WriteLine($"[CountyFusion] Captured summary info for record {i + 1} from results list for potential fallback.");
+                        }
+                    }
 
                     if (!alreadyRecoveredForThisRecord)
                     {
@@ -544,10 +757,18 @@ public class ClermontScraperService
                             await FormFiller.ClickDisclaimerAcceptAsync(page);
                             await FormFiller.ClickSearchPublicRecordsAsync(page);
 
-                            await FormFiller.SetupSearchPageAsync(page, _effectiveDisplay);
-                            await FormFiller.SetDateRangeForDayAsync(page, searchDate);
-                            await Task.Delay(1500);
-                            await FormFiller.ClickSearchAsync(page);
+                            if (isInstrumentSearch && !string.IsNullOrWhiteSpace(instrumentNumber))
+                            {
+                                await FormFiller.SetupInstrumentSearchAsync(page, instrumentNumber, _effectiveDisplay);
+                                await FormFiller.ClickSearchAsync(page);
+                            }
+                            else
+                            {
+                                await FormFiller.SetupSearchPageAsync(page, _effectiveDisplay);
+                                await FormFiller.SetDateRangeForDayAsync(page, searchDate);
+                                await Task.Delay(1500);
+                                await FormFiller.ClickSearchAsync(page);
+                            }
 
                             bodyFrame = page.FrameLocator("iframe[name='bodyframe']");
                             resultFrame = bodyFrame.FrameLocator("iframe[name='resultFrame']");
@@ -573,9 +794,22 @@ public class ClermontScraperService
                             }
                             else
                             {
-                                Console.WriteLine($"[CountyFusion] Unable to locate instrument link index {i} after recovery. Skipping.");
-                                pageFailed++;
-                                await ApifyHelper.SetStatusMessageAsync($"Processing record {i + 1} of {totalToProcess}... {pageFailed} failed");
+                                if (recoveryRowSummary != null && recoveryAttemptedForIndex == i)
+                                {
+                                    Console.WriteLine($"[CountyFusion] Unable to locate instrument link index {i} after recovery. Writing summary info from results list instead of skipping.");
+                                    batch.Add(recoveryRowSummary);
+                                    pageSucceeded++;
+                                    recoveryRowSummary = null;
+                                    recoveryAttemptedForIndex = -1;
+                                }
+                                else
+                                {
+                                    Console.WriteLine($"[CountyFusion] Unable to locate instrument link index {i} after recovery. Skipping.");
+                                    pageFailed++;
+                                }
+
+                                await ApifyHelper.SetStatusMessageAsync(
+                                    $"Processing record {i + 1} of {totalToProcess}... {pageFailed} failed");
                             }
                         }
                         catch (Exception recoveryEx)
@@ -587,9 +821,22 @@ public class ClermontScraperService
                     }
                     else
                     {
-                        Console.WriteLine($"[CountyFusion] Record {i + 1} still not accessible after recovery. Skipping.");
-                        pageFailed++;
-                        await ApifyHelper.SetStatusMessageAsync($"Processing record {i + 1} of {totalToProcess}... {pageFailed} failed");
+                        if (recoveryRowSummary != null && recoveryAttemptedForIndex == i)
+                        {
+                            Console.WriteLine($"[CountyFusion] Record {i + 1} still not accessible after recovery. Writing summary info from results list instead of skipping.");
+                            batch.Add(recoveryRowSummary);
+                            pageSucceeded++;
+                            recoveryRowSummary = null;
+                            recoveryAttemptedForIndex = -1;
+                        }
+                        else
+                        {
+                            Console.WriteLine($"[CountyFusion] Record {i + 1} still not accessible after recovery. Skipping.");
+                            pageFailed++;
+                        }
+
+                        await ApifyHelper.SetStatusMessageAsync(
+                            $"Processing record {i + 1} of {totalToProcess}... {pageFailed} failed");
                     }
                 }
             }
@@ -613,7 +860,14 @@ public class ClermontScraperService
         {
             await FormFiller.ClickBackToResultsAsync(page);
             await FormFiller.ClickNextResultsPageAsync(page);
-            var (childTotal, childSucceeded, childFailed) = await ScrapeAllRecordsOnResultsPageAsync(page, searchDate, outputDirectory, exportImages);
+            var (childTotal, childSucceeded, childFailed) = await ScrapeAllRecordsOnResultsPageAsync(
+                page,
+                searchDate,
+                outputDirectory,
+                exportImages,
+                fileFormat,
+                isInstrumentSearch,
+                instrumentNumber);
             return (totalToProcess + childTotal, pageSucceeded + childSucceeded, pageFailed + childFailed);
         }
 

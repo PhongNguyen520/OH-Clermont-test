@@ -190,6 +190,136 @@ public static class FormFiller
         await Task.Delay(1500);
     }
 
+    /// <summary>
+    /// Configure Instrument Number search: select Instrument search type, set Records per page, and
+    /// put the same instrumentNumber into both From and To fields.
+    /// </summary>
+    public static async Task SetupInstrumentSearchAsync(IPage page, string instrumentNumber, int display)
+    {
+        var dynSearchFrame = page
+            .FrameLocator("iframe[name='bodyframe']")
+            .FrameLocator("iframe[name='dynSearchFrame']");
+
+        var criteriaFrame = dynSearchFrame
+            .FrameLocator("iframe[name='criteriaframe']");
+
+        await Task.Delay(2000);
+
+        // 1) Select "Instrument Number" search type in the left menu
+        var instrumentRow = dynSearchFrame.Locator(".SEARCHTYPE_datagrid-cell-c2-text span.base:has-text(\"Instrument Number\")");
+        if (await instrumentRow.CountAsync() > 0)
+        {
+            // Ensure the search types grid is ready
+            await instrumentRow.First.WaitForAsync(new LocatorWaitForOptions
+            {
+                State = WaitForSelectorState.Visible,
+                Timeout = 15_000
+            });
+            await instrumentRow.First.ClickAsync();
+        }
+
+        // Also tell EasyUI datalist to select the Instrument Number row explicitly
+        await dynSearchFrame.Locator("body").EvaluateAsync(@"
+            () => {
+                var jq = window.$ || window.jQuery;
+                if (!jq) return;
+                try {
+                    if (jq('#SEARCHTYPE').length && jq('#SEARCHTYPE').datalist) {
+                        // 0: All Names, 1: Instrument Number, 2: Book / Page
+                        jq('#SEARCHTYPE').datalist('selectRow', 1);
+                    }
+                } catch (e) { console.error('Error selecting SEARCHTYPE Instrument Number:', e); }
+            }");
+
+        // 2) Set records per page (reuse the same logic as SetupSearchPageAsync)
+        var recsPerPage = dynSearchFrame.Locator("#RECSPERPAGE");
+        if (await recsPerPage.CountAsync() > 0)
+        {
+            await recsPerPage.First.EvaluateAsync(
+                @"(node, d) => {
+                    try {
+                        var w = window;
+                        var jq = (w.$ || w.jQuery);
+                        if (jq && jq(node).combobox) {
+                            jq(node).combobox('setValue', d.toString());
+                        } else {
+                            node.value = d.toString();
+                            var span = node.nextElementSibling;
+                            if (span) {
+                                var visible = span.querySelector('input.textbox-text');
+                                if (visible) visible.value = d.toString();
+                                var hidden = span.querySelector(""input.textbox-value[name='RECSPERPAGE']"");
+                                if (hidden) hidden.value = d.toString();
+                            }
+                        }
+
+                        try {
+                            var submitFrame = (w.getSubmitFrame ? w.getSubmitFrame() : null);
+                            if (submitFrame && submitFrame.document) {
+                                var form = submitFrame.document.getElementById('searchForm');
+                                if (form && form.RECSPERPAGE) {
+                                    form.RECSPERPAGE.value = d.toString();
+                                }
+                            }
+                        } catch (e2) {}
+                    } catch (e) {}
+                }",
+                display);
+        }
+
+        // 3) Wait for network to settle so inner frames can load
+        await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await Task.Delay(2000);
+
+        // Execute a recursive script from the top-level page to find and fill the EasyUI textboxes
+        await page.EvaluateAsync(@"
+            (instrumentValue) => {
+                function setValInWindow(win) {
+                    try {
+                        var jq = (win.$ || win.jQuery);
+                        if (jq) {
+                            var fromEl = jq('#INSTNUM');
+                            var toEl = jq('#INSTNUMEND');
+                            
+                            var success = false;
+                            
+                            if (fromEl.length > 0 && typeof fromEl.textbox === 'function') {
+                                fromEl.textbox('setValue', instrumentValue);
+                                success = true;
+                            }
+                            if (toEl.length > 0 && typeof toEl.textbox === 'function') {
+                                toEl.textbox('setValue', instrumentValue);
+                                success = true;
+                            }
+                            
+                            if (success) return true;
+                        }
+                        
+                        // Fallback: check native DOM just in case EasyUI isn't used
+                        var natFrom = win.document.getElementById('INSTNUM');
+                        var natTo = win.document.getElementById('INSTNUMEND');
+                        if (natFrom) natFrom.value = instrumentValue;
+                        if (natTo) natTo.value = instrumentValue;
+                        if (natFrom || natTo) return true;
+
+                    } catch (e) {
+                        // ignore cross-origin or other errors
+                    }
+
+                    // Recursively check inner frames
+                    for (var i = 0; i < win.frames.length; i++) {
+                        if (setValInWindow(win.frames[i])) return true;
+                    }
+                    return false;
+                }
+
+                setValInWindow(window);
+            }
+        ", instrumentNumber);
+
+        await Task.Delay(1000);
+    }
+
     /// <summary>Set date range in criteriaframe via JavaScript on hidden inputs.</summary>
     public static async Task SetDateRangeForDayAsync(IPage page, DateTime date)
     {

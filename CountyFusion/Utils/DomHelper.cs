@@ -2,7 +2,7 @@ using System.Globalization;
 using System.Text.RegularExpressions;
 using Microsoft.Playwright;
 
-namespace OH_Clermont.Utils;
+namespace CountyFusion.Utils;
 
 /// <summary>DOM extraction and parsing utilities for Clermont County scraper.</summary>
 public static class DomHelper
@@ -60,6 +60,30 @@ public static class DomHelper
                 return true;
         }
         return false;
+    }
+
+    /// <summary>Extract instrument number from raw text (e.g. Butler includes prevInstRowInfo/nextInstRowInfo junk).</summary>
+    public static string ExtractInstrumentNumber(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return string.Empty;
+
+        // Prefer full pattern like 2026-00004419 (4 digits, dash, 8 digits)
+        var m = Regex.Match(raw, @"\d{4}-\d{8}");
+        if (m.Success)
+            return m.Value;
+
+        var firstLine = raw.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(l => l.Trim())
+            .FirstOrDefault(l => l.Length > 0 && char.IsDigit(l[0]));
+        if (!string.IsNullOrWhiteSpace(firstLine))
+        {
+            var token = Regex.Match(firstLine, @"[\d\-]+").Value;
+            if (token.Length > 0 && token.Length <= 20)
+                return token;
+        }
+
+        return string.Empty;
     }
 
     /// <summary>Get value from sibling cell of td containing label in docInfoFrame.</summary>

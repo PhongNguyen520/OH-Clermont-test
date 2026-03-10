@@ -1,6 +1,6 @@
 {
   "profiles": {
-    "OH_Clermont": {
+    "CountyFusion": {
       "commandName": "Project",
       "workingDirectory": "$(ProjectDir)",
       "environmentVariables": {

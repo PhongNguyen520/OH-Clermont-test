@@ -3,16 +3,16 @@ WORKDIR /app
 
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
-COPY ["OH_Clermont/OH_Clermont.csproj", "OH_Clermont/"]
-RUN dotnet restore "OH_Clermont/OH_Clermont.csproj"
+COPY ["CountyFusion/CountyFusion.csproj", "CountyFusion/"]
+RUN dotnet restore "CountyFusion/CountyFusion.csproj"
 COPY . .
-WORKDIR "/src/OH_Clermont"
-RUN dotnet build "OH_Clermont.csproj" -c Release -o /app/build
+WORKDIR "/src/CountyFusion"
+RUN dotnet build "CountyFusion.csproj" -c Release -o /app/build
 
 FROM build AS publish
-RUN dotnet publish "OH_Clermont.csproj" -c Release -o /app/publish
+RUN dotnet publish "CountyFusion.csproj" -c Release -o /app/publish
 
 FROM base AS final
 WORKDIR /app
 COPY --from=publish /app/publish .
-ENTRYPOINT ["dotnet", "OH_Clermont.dll"]
+ENTRYPOINT ["dotnet", "CountyFusion.dll"]

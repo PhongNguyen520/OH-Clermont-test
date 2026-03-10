@@ -1,1 +1,1 @@
-{"actorSpecification":1,"name":"oh-clermont","title":"OH_Clermont Scraper","version":"1.0","dockerfile":"./Dockerfile"}
+{"actorSpecification":1,"name":"county-fusion","title":"CountyFusion Scraper","version":"1.0","dockerfile":"./Dockerfile"}

@@ -3,16 +3,15 @@ using System.IO;
 using System.Runtime;
 using System.Text.RegularExpressions;
 using Microsoft.Playwright;
-using OH_Clermont;
-using OH_Clermont.Models;
-using OH_Clermont.Utils;
+using CountyFusion;
+using CountyFusion.Models;
+using CountyFusion.Utils;
 
-namespace OH_Clermont.Services;
+namespace CountyFusion.Services;
 
 /// <summary>Playwright-based scraper for Clermont County. Handles login, session errors, and public records search.</summary>
 public class ClermontScraperService
 {
-    const string CountyLoginUrl = "https://countyfusion2.govos.com/countyweb/loginDisplay.action?countyname=ClermontOH";
     const string TimeoutErrorSnippet = "This form has already been processed or the session timed out";
     const string ActiveSessionSnippet = "Login Failed: Active Session.";
 
@@ -20,13 +19,17 @@ public class ClermontScraperService
     IBrowser? _browser;
     IBrowserContext? _context;
     CsvExportHelper? _csvExportHelper;
+    string _currentLoginUrl = "https://countyfusion2.govos.com/countyweb/loginDisplay.action?countyname=ClermontOH";
+    int _effectiveDisplay = 500;
 
     /// <summary>Launches browser, opens login page, navigates to Search Criteria and fills from InputConfig.</summary>
     public async Task<IPage> LaunchAsync(InputConfig config)
     {
         config ??= new InputConfig();
 
-        await ApifyHelper.SetStatusMessageAsync("Starting OH-Clermont scraper...");
+        await ApifyHelper.SetStatusMessageAsync("Starting CountyFusion scraper...");
+        _currentLoginUrl = ResolveLoginUrl(config.CountyName);
+        _effectiveDisplay = GetMaxDisplayForCounty(config.CountyName);
 
         DateTime fromDate;
         try
@@ -87,7 +90,7 @@ public class ClermontScraperService
         var page = await _context.NewPageAsync();
         page.SetDefaultTimeout(30_000);
 
-        await page.GotoAsync(CountyLoginUrl, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
+        await page.GotoAsync(_currentLoginUrl, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
 
         if (await DomHelper.HasErrorSnippetAsync(page, TimeoutErrorSnippet))
         {
@@ -105,8 +108,7 @@ public class ClermontScraperService
         await FormFiller.ClickDisclaimerAcceptAsync(page);
         await FormFiller.ClickSearchPublicRecordsAsync(page);
 
-        var display = config.Display <= 0 ? 500 : config.Display;
-        await FormFiller.SetupSearchPageAsync(page, display);
+        await FormFiller.SetupSearchPageAsync(page, _effectiveDisplay);
 
         int searchRetries = 3;
         bool searchSuccess = false;
@@ -120,7 +122,7 @@ public class ClermontScraperService
                     await ApifyHelper.SetStatusMessageAsync($"Search attempt {attempt} of {searchRetries}...");
                     await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.NetworkIdle });
                     await Task.Delay(2000);
-                    await FormFiller.SetupSearchPageAsync(page, display);
+                    await FormFiller.SetupSearchPageAsync(page, _effectiveDisplay);
                 }
 
                 await FormFiller.SetDateRangeForDayAsync(page, fromDate);
@@ -165,8 +167,24 @@ public class ClermontScraperService
         return page;
     }
 
-    /// <summary>Scrape Instrument Info from DocumentInfoView detail page into ClermontRecord.</summary>
+    /// <summary>Scrape Instrument Info from DocumentInfoView detail page into ClermontRecord with retries until core labels are present.</summary>
     public static async Task<ClermontRecord> ScrapeInstrumentInfoAsync(IPage page)
+    {
+        const int maxAttempts = 3;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            var record = await ScrapeInstrumentInfoInternalAsync(page);
+            if (!string.IsNullOrWhiteSpace(record.DocumentNumber))
+                return record;
+
+            if (attempt < maxAttempts)
+                await Task.Delay(2000);
+        }
+
+        throw new InvalidOperationException("Failed to scrape Instrument Info after multiple attempts: Document Number is empty.");
+    }
+
+    static async Task<ClermontRecord> ScrapeInstrumentInfoInternalAsync(IPage page)
     {
         var docInfoFrame = page
             .FrameLocator("iframe[name='bodyframe']")
@@ -174,6 +192,19 @@ public class ClermontScraperService
             .FrameLocator("iframe[name='docInfoFrame']");
 
         await Task.Delay(2000);
+
+        try
+        {
+            var instrumentNumberLabel = docInfoFrame.Locator("span.base:has-text(\"Instrument Number:\")");
+            await instrumentNumberLabel.First.WaitForAsync(new LocatorWaitForOptions
+            {
+                State = WaitForSelectorState.Visible,
+                Timeout = 10_000
+            });
+        }
+        catch
+        {
+        }
 
         var record = new ClermontRecord
         {
@@ -183,7 +214,17 @@ public class ClermontScraperService
             PropertyAddress = string.Empty
         };
 
-        record.DocumentNumber = (await DomHelper.GetByLabelAsync(docInfoFrame, "Instrument Number:")).Trim();
+        for (var i = 0; i < 30; i++)
+        {
+            var raw = (await DomHelper.GetByLabelAsync(docInfoFrame, "Instrument Number:")).Trim();
+            record.DocumentNumber = DomHelper.ExtractInstrumentNumber(raw);
+            if (string.IsNullOrWhiteSpace(record.DocumentNumber) && raw.Length > 0 && raw.Length < 30 &&
+                !raw.Contains("prevInstRowInfo", StringComparison.OrdinalIgnoreCase) && !raw.Contains('\n'))
+                record.DocumentNumber = raw.Trim();
+            if (!string.IsNullOrWhiteSpace(record.DocumentNumber))
+                break;
+            await Task.Delay(500);
+        }
         record.BookType = (await DomHelper.GetByLabelAsync(docInfoFrame, "Book Type:")).Trim();
 
         var bookPage = await DomHelper.GetByLabelAsync(docInfoFrame, "Book / Page:");
@@ -201,6 +242,10 @@ public class ClermontScraperService
                 record.Page = cleanPage?.Trim() ?? string.Empty;
             }
         }
+        if (string.IsNullOrWhiteSpace(record.Book))
+            record.Book = (await DomHelper.GetByLabelAsync(docInfoFrame, "Book:")).Trim();
+        if (string.IsNullOrWhiteSpace(record.Page))
+            record.Page = (await DomHelper.GetByLabelAsync(docInfoFrame, "Page:")).Trim();
 
         var recDateRaw = await DomHelper.GetByLabelAsync(docInfoFrame, "Recorded Date:");
         if (!string.IsNullOrWhiteSpace(recDateRaw))
@@ -211,6 +256,8 @@ public class ClermontScraperService
 
         record.DocumentType = (await DomHelper.GetByLabelAsync(docInfoFrame, "Instrument Type:")).Trim();
         record.InstrumentDate = (await DomHelper.GetByLabelAsync(docInfoFrame, "Document Date:")).Trim();
+        if (string.IsNullOrWhiteSpace(record.InstrumentDate))
+            record.InstrumentDate = (await DomHelper.GetByLabelAsync(docInfoFrame, "Instrument Date:")).Trim();
 
         try
         {
@@ -279,16 +326,49 @@ public class ClermontScraperService
 
         try
         {
-            var tabsFrame = docInfoFrame.FrameLocator("iframe[name='tabs'], iframe#tabs");
+            var documentFrame = page
+                .FrameLocator("iframe[name='bodyframe']")
+                .FrameLocator("iframe[name='documentFrame']");
+            var tabsFrame = documentFrame.FrameLocator("iframe[name='tabs'], iframe#tabs");
             var legalTab = tabsFrame.Locator(".tabs-title:has-text(\"Legal Description\")");
+            if (await legalTab.CountAsync() == 0)
+                legalTab = tabsFrame.Locator(".tabs-title:has-text(\"Property / Legal\")");
 
             if (await legalTab.CountAsync() > 0)
             {
                 await legalTab.First.ClickAsync();
-                await Task.Delay(1500); // wait for Legal tab contents to load into docInfoFrame
+                await Task.Delay(1500);
+            }
+            else
+            {
+                var tabsInDocInfo = docInfoFrame.FrameLocator("iframe[name='tabs'], iframe#tabs");
+                legalTab = tabsInDocInfo.Locator(".tabs-title:has-text(\"Legal Description\")");
+                if (await legalTab.CountAsync() == 0)
+                    legalTab = tabsInDocInfo.Locator(".tabs-title:has-text(\"Property / Legal\")");
+                if (await legalTab.CountAsync() > 0)
+                {
+                    await legalTab.First.ClickAsync();
+                    await Task.Delay(1500);
+                }
             }
         }
         catch { }
+
+        for (var waitAttempt = 0; waitAttempt < 15; waitAttempt++)
+        {
+            try
+            {
+                var legalCells = docInfoFrame.Locator("td.basesm");
+                if (await legalCells.CountAsync() > 0)
+                {
+                    var firstText = (await legalCells.First.InnerTextAsync()).Trim();
+                    if (firstText.Length > 2)
+                        break;
+                }
+            }
+            catch { }
+            await Task.Delay(400);
+        }
 
         try
         {
@@ -401,56 +481,133 @@ public class ClermontScraperService
 
         var pageSucceeded = 0;
         var pageFailed = 0;
+        var recoveryAttemptedForIndex = -1;
 
         for (var i = 0; i < totalToProcess; i++)
         {
-            if ((i + 1) % 10 == 0)
+            var alreadyRecoveredForThisRecord = recoveryAttemptedForIndex == i;
+
+            if ((i + 1) % 10 == 0 || pageFailed > 0)
             {
-                await ApifyHelper.SetStatusMessageAsync($"Processing record {i + 1} of {totalToProcess} on current page...");
+                var status = pageFailed > 0
+                    ? $"Processing record {i + 1} of {totalToProcess}... {pageFailed} failed"
+                    : $"Processing record {i + 1} of {totalToProcess} on current page...";
+                await ApifyHelper.SetStatusMessageAsync(status);
             }
 
             try
             {
-                if (i == 0)
+                try
                 {
-                    var firstLink = resultListFrame.Locator(instrumentSelector).First;
-                    await firstLink.ScrollIntoViewIfNeededAsync();
-                    await firstLink.ClickAsync();
+                    if (i == 0)
+                    {
+                        var firstLink = resultListFrame.Locator(instrumentSelector).First;
+                        await firstLink.ScrollIntoViewIfNeededAsync();
+                        await firstLink.ClickAsync();
+                    }
+                    else
+                    {
+                        var moved = await FormFiller.ClickNextDocumentAsync(page);
+                        if (!moved)
+                        {
+                            var clicked = await FormFiller.ClickInstrumentAtIndexAsync(page, i);
+                            if (!clicked)
+                            {
+                                pageFailed++;
+                                await ApifyHelper.SetStatusMessageAsync($"Processing record {i + 1} of {totalToProcess}... {pageFailed} failed");
+                                break;
+                            }
+                        }
+                    }
+
+                    var record = await ScrapeInstrumentInfoAsync(page);
+                    batch.Add(record);
+
+                    if (exportImages)
+                        await ImageProcessor.ProcessImagesForCurrentRecordAsync(page, record, searchDate, i + 1);
+
+                    pageSucceeded++;
+                    recoveryAttemptedForIndex = -1;
                 }
-                else
+                catch (Exception ex)
                 {
-                    var moved = await FormFiller.ClickNextDocumentAsync(page);
-                    if (!moved)
-                        break;
+                    Console.WriteLine($"[CountyFusion] Error processing record {i + 1}: {ex.Message}");
+
+                    if (!alreadyRecoveredForThisRecord)
+                    {
+                        recoveryAttemptedForIndex = i;
+                        Console.WriteLine($"[CountyFusion] Attempting recovery (once)...");
+                        try
+                        {
+                            await ClearCookiesAndReloadAsync(page);
+                            await FormFiller.ClickLoginAsPublicAsync(page);
+                            await FormFiller.ClickDisclaimerAcceptAsync(page);
+                            await FormFiller.ClickSearchPublicRecordsAsync(page);
+
+                            await FormFiller.SetupSearchPageAsync(page, _effectiveDisplay);
+                            await FormFiller.SetDateRangeForDayAsync(page, searchDate);
+                            await Task.Delay(1500);
+                            await FormFiller.ClickSearchAsync(page);
+
+                            bodyFrame = page.FrameLocator("iframe[name='bodyframe']");
+                            resultFrame = bodyFrame.FrameLocator("iframe[name='resultFrame']");
+                            resultListFrame = resultFrame.FrameLocator("iframe[name='resultListFrame']");
+
+                        if (currentPage > 1 && totalPages >= currentPage)
+                        {
+                            for (var pageIndex = 1; pageIndex < currentPage; pageIndex++)
+                            {
+                                Console.WriteLine($"[Recovery] Navigating to page {pageIndex + 1} of {currentPage}...");
+                                await FormFiller.ClickNextResultsPageAsync(page);
+                            }
+                        }
+
+                            var links = resultListFrame.Locator(instrumentSelector);
+                            var linkCountAfterRecovery = await links.CountAsync();
+                            if (linkCountAfterRecovery > i)
+                            {
+                                var link = links.Nth(i);
+                                await link.ScrollIntoViewIfNeededAsync();
+                                await link.ClickAsync();
+                                i--;
+                            }
+                            else
+                            {
+                                Console.WriteLine($"[CountyFusion] Unable to locate instrument link index {i} after recovery. Skipping.");
+                                pageFailed++;
+                                await ApifyHelper.SetStatusMessageAsync($"Processing record {i + 1} of {totalToProcess}... {pageFailed} failed");
+                            }
+                        }
+                        catch (Exception recoveryEx)
+                        {
+                            Console.WriteLine($"[CountyFusion] Recovery failed for record {i + 1}: {recoveryEx.Message}. Skipping.");
+                            pageFailed++;
+                            await ApifyHelper.SetStatusMessageAsync($"Processing record {i + 1} of {totalToProcess}... {pageFailed} failed");
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[CountyFusion] Record {i + 1} still not accessible after recovery. Skipping.");
+                        pageFailed++;
+                        await ApifyHelper.SetStatusMessageAsync($"Processing record {i + 1} of {totalToProcess}... {pageFailed} failed");
+                    }
                 }
-
-                var record = await ScrapeInstrumentInfoAsync(page);
-                batch.Add(record);
-
-                if (exportImages)
-                    await ImageProcessor.ProcessImagesForCurrentRecordAsync(page, record, searchDate, i + 1);
-
-                pageSucceeded++;
             }
-            catch (Exception ex)
+            catch
             {
-                Console.WriteLine($"[OH_Clermont] Error processing record {i + 1}: {ex.Message}");
-                pageFailed++;
             }
-
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
 
             if (batch.Count >= 1 || i == totalToProcess - 1)
             {
                 await ApifyHelper.PushDataAsync(batch);
                 _csvExportHelper?.WriteBatchToCsvAndFlush(batch);
                 batch.Clear();
-                GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
-                GC.Collect(2, GCCollectionMode.Forced);
-                GC.WaitForPendingFinalizers();
             }
         }
+
+        GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
+        GC.Collect(2, GCCollectionMode.Forced);
+        GC.WaitForPendingFinalizers();
 
         if (currentPage > 0 && totalPages > 0 && currentPage < totalPages)
         {
@@ -475,7 +632,34 @@ public class ClermontScraperService
             try { sessionStorage.clear(); } catch(e) {}
         }");
 
-        await page.GotoAsync(CountyLoginUrl, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
+        await page.GotoAsync(_currentLoginUrl, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
+    }
+
+    /// <summary>Resolves the GovOS login URL for the requested county.</summary>
+    static string ResolveLoginUrl(string? countyName)
+    {
+        if (string.IsNullOrWhiteSpace(countyName) ||
+            string.Equals(countyName.Trim(), "Clermont", StringComparison.OrdinalIgnoreCase))
+            return "https://countyfusion2.govos.com/countyweb/loginDisplay.action?countyname=ClermontOH";
+
+        if (string.Equals(countyName.Trim(), "Ross", StringComparison.OrdinalIgnoreCase))
+            return "https://countyfusion10.govos.com/countyweb/loginDisplay.action?countyname=RossOH";
+
+        if (string.Equals(countyName.Trim(), "Butler", StringComparison.OrdinalIgnoreCase))
+            return "https://countyfusion13.govos.com/countyweb/loginDisplay.action?countyname=ButlerOH";
+
+        throw new ArgumentException($"Unknown CountyName '{countyName}'. Supported: Clermont, Ross, Butler.");
+    }
+
+    static int GetMaxDisplayForCounty(string? countyName)
+    {
+        if (string.IsNullOrWhiteSpace(countyName) ||
+            string.Equals(countyName.Trim(), "Clermont", StringComparison.OrdinalIgnoreCase))
+            return 500;
+        if (string.Equals(countyName.Trim(), "Ross", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(countyName.Trim(), "Butler", StringComparison.OrdinalIgnoreCase))
+            return 250;
+        return 500;
     }
 
     /// <summary>Close browser, context, CSV stream. Try Log Out if page still open.</summary>

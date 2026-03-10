@@ -1,20 +1,12 @@
-namespace OH_Clermont.Models;
+namespace CountyFusion.Models;
 
 /// <summary>
 /// Input configuration loaded from JSON (local input.json or Apify input).
-/// Controls the search form: Display, Name, FromDate, ToDate.
-/// </summary>
+/// Controls the search form: FromDate, ToDate. Records per page set to county max.</summary>
 public class InputConfig
 {
-    /// <summary>
-    /// Number of records per page. The crawler expects 500, but the field is kept for input mapping.
-    /// </summary>
-    public int Display { get; set; } = 500;
-
-    /// <summary>
-    /// Optional name to search. <c>null</c> or empty string means the Name field is left blank.
-    /// </summary>
-    public string? Name { get; set; }
+    /// <summary>County name used to select the GovOS environment (default: Clermont).</summary>
+    public string? CountyName { get; set; }
 
     /// <summary>
     /// Start date, required. Supports "yyyy-MM-dd" or "MM/dd/yyyy" formats.

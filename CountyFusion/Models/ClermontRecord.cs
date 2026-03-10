@@ -2,7 +2,7 @@ using System.Globalization;
 using CsvHelper.Configuration;
 using CsvHelper.Configuration.Attributes;
 
-namespace OH_Clermont.Models;
+namespace CountyFusion.Models;
 
 /// <summary>
 /// Data model for one CSV row (16 columns exactly as required).

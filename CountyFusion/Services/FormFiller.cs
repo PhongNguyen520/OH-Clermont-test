@@ -1,23 +1,44 @@
 using Microsoft.Playwright;
 
-namespace OH_Clermont.Services;
+namespace CountyFusion.Services;
 
 /// <summary>Form filling and navigation utilities for Clermont County public records search.</summary>
 public static class FormFiller
 {
-    /// <summary>Click "Login as Public" after NetworkIdle.</summary>
+    /// <summary>Click public/guest login button after NetworkIdle (supports Clermont/Ross/Butler layouts).</summary>
     public static async Task ClickLoginAsPublicAsync(IPage page)
     {
         await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
         await Task.Delay(1000);
 
         var loginAsPublic = page.Locator("input[value='Login as Public']");
-        await loginAsPublic.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
-        await loginAsPublic.ClickAsync();
+        if (await loginAsPublic.CountAsync() > 0)
+        {
+            await loginAsPublic.First.WaitForAsync(new LocatorWaitForOptions
+            {
+                State = WaitForSelectorState.Visible,
+                Timeout = 30_000
+            });
+            await loginAsPublic.First.ClickAsync();
+        }
+        else
+        {
+            var loginAsGuest = page.Locator("input[value='Login as Guest']");
+            if (await loginAsGuest.CountAsync() == 0)
+                throw new TimeoutException("Could not find either 'Login as Public' or 'Login as Guest' button on the login page.");
+
+            await loginAsGuest.First.WaitForAsync(new LocatorWaitForOptions
+            {
+                State = WaitForSelectorState.Visible,
+                Timeout = 30_000
+            });
+            await loginAsGuest.First.ClickAsync();
+        }
+
         await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
     }
 
-    /// <summary>Click Accept on disclaimer page (bodyframe iframe).</summary>
+    /// <summary>Click Accept on disclaimer page (bodyframe iframe). Skips if no disclaimer (e.g. Butler/Ross).</summary>
     public static async Task ClickDisclaimerAcceptAsync(IPage page)
     {
         await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
@@ -31,9 +52,16 @@ public static class FormFiller
         await Task.Delay(1000);
 
         var accept = root.Locator("input#accept[value='Accept']");
-        await accept.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 30_000 });
-        await accept.ClickAsync();
-        await root.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        try
+        {
+            await accept.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 8000 });
+            await accept.First.ClickAsync();
+            await root.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        }
+        catch (TimeoutException)
+        {
+            // No disclaimer (Butler/Ross) - continue
+        }
     }
 
     /// <summary>Click "Search Public Records" on welcome page.</summary>
@@ -93,16 +121,26 @@ public static class FormFiller
                         var jq = (w.$ || w.jQuery);
                         if (jq && jq(node).combobox) {
                             jq(node).combobox('setValue', d.toString());
-                            return;
+                        } else {
+                            node.value = d.toString();
+                            var span = node.nextElementSibling;
+                            if (span) {
+                                var visible = span.querySelector('input.textbox-text');
+                                if (visible) visible.value = d.toString();
+                                var hidden = span.querySelector(""input.textbox-value[name='RECSPERPAGE']"");
+                                if (hidden) hidden.value = d.toString();
+                            }
                         }
-                        node.value = d.toString();
-                        var span = node.nextElementSibling;
-                        if (span) {
-                            var visible = span.querySelector('input.textbox-text');
-                            if (visible) visible.value = d.toString();
-                            var hidden = span.querySelector(""input.textbox-value[name='RECSPERPAGE']"");
-                            if (hidden) hidden.value = d.toString();
-                        }
+
+                        try {
+                            var submitFrame = (w.getSubmitFrame ? w.getSubmitFrame() : null);
+                            if (submitFrame && submitFrame.document) {
+                                var form = submitFrame.document.getElementById('searchForm');
+                                if (form && form.RECSPERPAGE) {
+                                    form.RECSPERPAGE.value = d.toString();
+                                }
+                            }
+                        } catch (e2) {}
                     } catch (e) {}
                 }",
                 display);
@@ -280,6 +318,32 @@ public static class FormFiller
         return true;
     }
 
+    /// <summary>Click the instrument link at the given zero-based index in the result list.</summary>
+    public static async Task<bool> ClickInstrumentAtIndexAsync(IPage page, int index)
+    {
+        if (index < 0)
+            return false;
+
+        var bodyFrame = page.FrameLocator("iframe[name='bodyframe']");
+        var resultFrame = bodyFrame.FrameLocator("iframe[name='resultFrame']");
+        var resultListFrame = resultFrame.FrameLocator("iframe[name='resultListFrame']");
+
+        const string instrumentSelector =
+            "#instList .datagrid-view2 .datagrid-body .datagrid-btable tr.datagrid-row td[field='2'] a";
+
+        var links = resultListFrame.Locator(instrumentSelector);
+        var count = await links.CountAsync();
+        if (index >= count)
+            return false;
+
+        var link = links.Nth(index);
+        await link.ScrollIntoViewIfNeededAsync();
+        await link.ClickAsync();
+        await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await Task.Delay(1000);
+        return true;
+    }
+
     /// <summary>Click "Go to next result page" in subnav iframe.</summary>
     public static async Task ClickNextResultsPageAsync(IPage page)
     {
@@ -303,7 +367,16 @@ public static class FormFiller
         }
 
         await nextPageLink.First.ClickAsync();
-        await Task.Delay(2000);
+        try
+        {
+            await page.WaitForLoadStateAsync(
+                LoadState.NetworkIdle,
+                new PageWaitForLoadStateOptions { Timeout = 15_000 });
+        }
+        catch
+        {
+        }
+        await Task.Delay(1000);
         Console.WriteLine("[ResultsNav] Clicked Go to next result page.");
     }
 

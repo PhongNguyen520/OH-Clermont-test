@@ -1,9 +1,9 @@
 using System.Collections.Generic;
 using System.IO;
 using CsvHelper;
-using OH_Clermont.Models;
+using CountyFusion.Models;
 
-namespace OH_Clermont.Utils;
+namespace CountyFusion.Utils;
 
 /// <summary>CSV export with streamed writes for Clermont records.</summary>
 public class CsvExportHelper
@@ -19,7 +19,7 @@ public class CsvExportHelper
         var baseDir = GetBaseDirForStorage(outputDirectory);
         var kvStoreDir = Path.Combine(baseDir, "apify_storage", "key_value_store");
         Directory.CreateDirectory(kvStoreDir);
-        var fileName = $"OH-Clermont_{searchDate:MM-dd-yyyy}.csv";
+        var fileName = $"CountyFusion_{searchDate:MM-dd-yyyy}.csv";
         var filePath = Path.Combine(kvStoreDir, fileName);
         var fileExists = File.Exists(filePath);
 
@@ -76,7 +76,7 @@ public class CsvExportHelper
         var baseDir = GetBaseDirForStorage(outputDirectory);
         var kvStoreDir = Path.Combine(baseDir, "apify_storage", "key_value_store");
         Directory.CreateDirectory(kvStoreDir);
-        var fileName = $"OH-Clermont_{searchDate:MM-dd-yyyy}.csv";
+        var fileName = $"CountyFusion_{searchDate:MM-dd-yyyy}.csv";
         var filePath = Path.Combine(kvStoreDir, fileName);
         var fileExists = File.Exists(filePath);
         var config = ClermontRecord.CreateCsvConfiguration();

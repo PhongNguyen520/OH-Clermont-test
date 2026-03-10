@@ -1,17 +1,16 @@
 {
-  "title": "OH_Clermont Scraper Input",
-  "description": "Search input for Clermont County recorder website.",
+  "title": "CountyFusion Scraper Input",
+  "description": "Search input for GovOS County recorder websites (Clermont, Ross, Butler).",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
     "input": {
       "title": "Search configuration",
       "type": "object",
-      "description": "Form search config. display: records per page (must be 500). name: optional party name. fromDate/toDate: required, date in MM/dd/yyyy (e.g. 01/01/2024).",
+      "description": "Form search config. countyName: Clermont (default), Ross, or Butler. Records per page set to county max. fromDate/toDate: required, MM/dd/yyyy.",
       "editor": "json",
       "prefill": {
-        "display": 500,
-        "name": "",
+        "countyName": "Clermont",
         "fromDate": "01/01/2024",
         "toDate": "01/01/2024"
       }
